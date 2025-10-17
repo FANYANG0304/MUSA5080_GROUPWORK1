@@ -38,7 +38,18 @@ opa_res <- opa_raw %>%
     total_livable_area > 0,
     year_built > 0,
     number_of_bedrooms > 0,
-    number_of_bathrooms > 0
+    number_of_bathrooms > 0,
+    !is.na(census_tract),
+    census_tract != 0,
+    census_tract != "",
+    !is.na(zip_code),
+    zip_code != "",
+    !is.na(exterior_condition),
+    exterior_condition != "",
+    !is.na(interior_condition),
+    interior_condition != "",
+    !is.na(shape),
+    shape != ""
   ) %>%
   select(
     parcel_number, sale_date,
@@ -47,7 +58,7 @@ opa_res <- opa_raw %>%
     total_livable_area, year_built,
     zip_code, category_code,
     exterior_condition, interior_condition,
-    shape
+    census_tract, shape
   ) %>%
   distinct() %>%
   drop_na()
@@ -96,13 +107,130 @@ opa_export <- opa_sf %>%
     total_livable_area, year_built,
     zip_code, category_code,
     exterior_condition, interior_condition,
-    x_coord = X, y_coord = Y
+    census_tract, x_coord = X, y_coord = Y
   ) %>%
   st_drop_geometry()  # 强制删除geometry列
 
-write_csv(opa_export, "opa_sales_2023_2024_residential_clean.csv")
+write_csv(opa_export, "./data/opa_sales_2023_2024_residential_clean.csv")
 
 cat("Cleaned data saved to: opa_sales_2023_2024_residential_clean.csv\n")
 cat("Final dataset contains", nrow(opa_export), "rows with", ncol(opa_export), "columns\n")
 cat("Columns:", paste(names(opa_export), collapse = ", "), "\n")
+```
+
+```{r}
+# =========================================================
+# Step 5: Load, clean and save crime data
+# =========================================================
+# 确保必要的库已加载
+library(readr)
+library(dplyr)
+library(lubridate)
+library(here)
+library(tidyr)
+library(sf)
+
+# 加载2023年和2024年的犯罪数据
+crime_2023 <- read_csv(here("./data/crime_2023.csv"), na = c("", "NA", "NaN", "NULL"), guess_max = 1e6)
+crime_2024 <- read_csv(here("./data/crime_2024.csv"), na = c("", "NA", "NaN", "NULL"), guess_max = 1e6)
+
+# 合并、清理并处理犯罪数据
+crime_clean <- bind_rows(
+  crime_2023 %>% mutate(year = 2023),
+  crime_2024 %>% mutate(year = 2024)
+) %>%
+  mutate(
+    dispatch_date_time = as_datetime(dispatch_date_time),
+    dispatch_date = as_date(dispatch_date),
+    lat = as.numeric(lat),
+    lng = as.numeric(lng),
+    point_x = as.numeric(point_x),
+    point_y = as.numeric(point_y),
+    ucr_general = as.numeric(ucr_general),
+    text_general_code = as.character(text_general_code)
+  ) %>%
+  filter(
+    !is.na(lat) & !is.na(lng),
+    lat != 0 & lng != 0,
+    dispatch_date >= as_date("2023-01-01"),
+    dispatch_date <= as_date("2024-12-31")
+  ) %>%
+  select(
+    objectid, dc_dist, psa, dispatch_date_time, dispatch_date, 
+    dispatch_time, hour, dc_key, location_block, 
+    ucr_general, text_general_code, 
+    lat, lng, point_x, point_y, year
+  ) %>%
+  distinct() %>%
+  drop_na()
+
+# 坐标转换：从WGS84 (4326) 转换为2272坐标系
+crime_sf <- crime_clean %>%
+  # 创建sf对象，原始坐标为WGS84 (4326)
+  st_as_sf(coords = c("lng", "lat"), crs = 4326) %>%
+  # 转换到2272坐标系
+  st_transform(crs = 2272) %>%
+  # 提取转换后的坐标
+  mutate(
+    x_coord_2272 = st_coordinates(.)[, 1],
+    y_coord_2272 = st_coordinates(.)[, 2]
+  ) %>%
+  # 移除geometry列，保留坐标
+  st_drop_geometry()
+
+# 保存清理后的犯罪数据
+write_csv(crime_sf, here("./data/crime_data_2023_2024_clean.csv"))
+
+cat("犯罪数据加载完成:\n")
+cat("2023年犯罪记录数:", nrow(crime_2023), "\n")
+cat("2024年犯罪记录数:", nrow(crime_2024), "\n")
+cat("清理后有效犯罪记录数:", nrow(crime_clean), "\n")
+cat("坐标转换后记录数:", nrow(crime_sf), "\n")
+cat("犯罪数据已保存到: ./data/crime_data_2023_2024_clean.csv\n")
+cat("坐标已转换为2272坐标系\n")
+```
+
+```{r}
+# =========================================================
+# Step 6: Calculate crime count within 500m of each property
+# =========================================================
+# 确保必要的库已加载
+library(sf)
+library(dplyr)
+
+# 读取清理后的房地产数据
+opa_clean <- read_csv(here("./data/opa_sales_2023_2024_residential_clean.csv"))
+
+# 读取清理后的犯罪数据
+crime_clean <- read_csv(here("./data/crime_data_2023_2024_clean.csv"))
+
+# 将房地产数据转换为sf对象（2272坐标系）
+opa_sf <- opa_clean %>%
+  st_as_sf(coords = c("x_coord", "y_coord"), crs = 2272)
+
+# 将犯罪数据转换为sf对象（2272坐标系）
+crime_sf <- crime_clean %>%
+  st_as_sf(coords = c("x_coord_2272", "y_coord_2272"), crs = 2272)
+
+# 为每个房子创建500米缓冲区
+opa_buffers <- st_buffer(opa_sf, dist = 500)
+
+# 计算每个房子500米范围内的犯罪数量
+crime_count <- st_intersects(opa_buffers, crime_sf)
+
+# 将犯罪数量添加到房地产数据中
+opa_with_crime <- opa_clean %>%
+  mutate(
+    crime_count_500m = sapply(crime_count, length)
+  )
+
+# 保存包含犯罪数量的最终数据
+write_csv(opa_with_crime, here("./data/opa_sales_with_crime_count.csv"))
+
+cat("犯罪数量计算完成:\n")
+cat("房地产记录数:", nrow(opa_with_crime), "\n")
+cat("犯罪记录数:", nrow(crime_clean), "\n")
+cat("平均每个房子500米内犯罪数量:", round(mean(opa_with_crime$crime_count_500m), 2), "\n")
+cat("犯罪数量范围:", min(opa_with_crime$crime_count_500m), "-", max(opa_with_crime$crime_count_500m), "\n")
+cat("最终数据已保存到: ./data/opa_sales_with_crime_count.csv\n")
 ```
