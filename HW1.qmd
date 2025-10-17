@@ -1,0 +1,108 @@
+```{r}
+# =========================================================
+# Step 1: Load libraries and data
+# =========================================================
+library(readr)
+library(dplyr)
+library(lubridate)
+library(here)
+library(tidyr)
+library(stringr)
+
+opa_raw <- read_csv("D:/UPENN/MUSA5080/HW1/opa_properties_public.csv",
+                    na = c("", "NA", "NaN", "NULL"),
+                    guess_max = 1e6)
+
+cat("Rows (loaded):", nrow(opa_raw), "\n")
+```
+
+```{r}
+# =========================================================
+# Step 2: Data cleaning and filtering
+# =========================================================
+opa_res <- opa_raw %>%
+  mutate(
+    sale_date = as_date(sale_date),
+    # 价格统一为数值：无论原来是数值还是字符（含$, 逗号）
+    sale_price_num = suppressWarnings(
+      coalesce(as.numeric(sale_price), readr::parse_number(as.character(sale_price)))
+    ),
+    # 类别统一类型
+    cat_chr = as.character(category_code)
+  ) %>%
+  filter(
+    cat_chr %in% c("1"),  
+    sale_date >= as_date("2023-01-01"),
+    sale_date <= as_date("2024-12-31"),
+    sale_price_num >= 10000,
+    total_livable_area > 0,
+    year_built > 0,
+    number_of_bedrooms > 0,
+    number_of_bathrooms > 0
+  ) %>%
+  select(
+    parcel_number, sale_date,
+    sale_price = sale_price_num,
+    number_of_bedrooms, number_of_bathrooms,
+    total_livable_area, year_built,
+    zip_code, category_code,
+    exterior_condition, interior_condition,
+    shape
+  ) %>%
+  distinct() %>%
+  drop_na()
+
+cat("Rows (after cleaning and filtering):", nrow(opa_res), "\n")
+```
+
+```{r}
+# =========================================================
+# Step 3: Extract coordinates from shape field (using sf)
+# =========================================================
+library(sf)
+library(ggplot2)
+library(viridis)
+
+# 去掉 SRID=2272; 前缀
+wkt <- sub("^SRID=\\d+;\\s*", "", opa_res$shape)
+
+# 转换为 sf
+geom <- st_as_sfc(wkt, crs = 2272)
+opa_sf <- st_sf(opa_res, geometry = geom)
+
+# 提取坐标（用于散点图）
+coords <- st_coordinates(opa_sf)
+opa_sf$X <- coords[, 1]
+opa_sf$Y <- coords[, 2]
+
+# 调试输出
+cat("Rows with valid coordinates:", nrow(opa_sf), "\n")
+cat("Sample X coordinates:", head(opa_sf$X, 3), "\n")
+cat("Sample Y coordinates:", head(opa_sf$Y, 3), "\n")
+```
+
+```{r}
+# =========================================================
+# Step 4: Save cleaned data
+# =========================================================
+# 创建输出目录
+dir.create(here::here("data"), recursive = TRUE, showWarnings = FALSE)
+
+# 导出数据（移除geometry列，只保留坐标）
+opa_export <- opa_sf %>%
+  select(
+    parcel_number, sale_date, sale_price,
+    number_of_bedrooms, number_of_bathrooms,
+    total_livable_area, year_built,
+    zip_code, category_code,
+    exterior_condition, interior_condition,
+    x_coord = X, y_coord = Y
+  ) %>%
+  st_drop_geometry()  # 强制删除geometry列
+
+write_csv(opa_export, "../data/opa_sales_2023_2024_residential_clean.csv")
+
+cat("Cleaned data saved to: data/opa_sales_2023_2024_residential_clean.csv\n")
+cat("Final dataset contains", nrow(opa_export), "rows with", ncol(opa_export), "columns\n")
+cat("Columns:", paste(names(opa_export), collapse = ", "), "\n")
+```
