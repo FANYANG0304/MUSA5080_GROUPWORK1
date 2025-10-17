@@ -1,0 +1,45 @@
+```{r warning=FALSE, message=FALSE}
+# ============================================================
+# # Step 1: Load secondary data (Hospitals) & basic cleaning
+# ============================================================
+library(sf)
+library(dplyr)
+library(readr)
+
+# 读取清洗后的CSV
+opa_sales <- read_csv("./data/opa_sales_2023_2024_residential_clean.csv")
+
+# 转换为 sf 对象（用坐标构造geometry）
+opa_sales_sf <- st_as_sf(
+  opa_sales,
+  coords = c("x_coord", "y_coord"),
+  crs = 2272  # 与 Parks 数据一致
+)
+
+cat("Rows (cleaned sales):", nrow(opa_sales_sf), "\n")
+```
+
+```{r}
+hospitals <- st_read("./data/Hospitals.geojson") %>%
+  st_transform(2272)
+
+# 计算距离和500m内数量
+opa_sales_sf <- opa_sales_sf %>%
+  mutate(
+    dist_to_ppr = apply(st_distance(opa_sales_sf,hospitals), 1, min),
+    ppr_500m = lengths(st_within(opa_sales_sf, st_buffer(hospitals, 1640)))  # 500m≈1640英尺
+  )
+
+# 检查新增列
+glimpse(opa_sales_sf)
+
+```
+
+
+
+
+```
+
+
+
+```
