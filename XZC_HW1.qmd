@@ -1,0 +1,250 @@
+```{r}
+# =========================================================
+# Step 1: Load libraries and data
+# =========================================================
+library(readr)
+library(dplyr)
+library(lubridate)
+library(here)
+library(tidyr)
+library(stringr)
+
+opa_raw <- read_csv("data/opa_properties_public.csv",
+                    na = c("", "NA", "NaN", "NULL"),
+                    guess_max = 1e6)
+
+cat("Rows (loaded):", nrow(opa_raw), "\n")
+```
+
+```{r}
+# =========================================================
+# Step 2: Data cleaning and filtering
+# =========================================================
+opa_res <- opa_raw %>%
+  mutate(
+    sale_date = as_date(sale_date),
+    # 价格统一为数值：无论原来是数值还是字符（含$, 逗号）
+    sale_price_num = suppressWarnings(
+      coalesce(as.numeric(sale_price), readr::parse_number(as.character(sale_price)))
+    ),
+    # 类别统一类型
+    cat_chr = as.character(category_code)
+  ) %>%
+  filter(
+    cat_chr %in% c("1"),  
+    sale_date >= as_date("2023-01-01"),
+    sale_date <= as_date("2024-12-31"),
+    sale_price_num >= 10000,
+    total_livable_area > 0,
+    year_built > 0,
+    number_of_bedrooms > 0,
+    number_of_bathrooms > 0
+  ) %>%
+  select(
+    parcel_number, sale_date,
+    sale_price = sale_price_num,
+    number_of_bedrooms, number_of_bathrooms,
+    total_livable_area, year_built,
+    zip_code, category_code,
+    exterior_condition, interior_condition,
+    shape
+  ) %>%
+  distinct() %>%
+  drop_na()
+
+cat("Rows (after cleaning and filtering):", nrow(opa_res), "\n")
+```
+
+```{r}
+# =========================================================
+# Step 3: Extract coordinates from shape field (using sf)
+# =========================================================
+library(sf)
+library(ggplot2)
+library(viridis)
+
+# 去掉 SRID=2272; 前缀
+wkt <- sub("^SRID=\\d+;\\s*", "", opa_res$shape)
+
+# 转换为 sf
+geom <- st_as_sfc(wkt, crs = 2272)
+opa_sf <- st_sf(opa_res, geometry = geom)
+
+# 提取坐标（用于散点图）
+coords <- st_coordinates(opa_sf)
+opa_sf$X <- coords[, 1]
+opa_sf$Y <- coords[, 2]
+
+# 调试输出
+cat("Rows with valid coordinates:", nrow(opa_sf), "\n")
+cat("Sample X coordinates:", head(opa_sf$X, 3), "\n")
+cat("Sample Y coordinates:", head(opa_sf$Y, 3), "\n")
+```
+
+```{r}
+# =========================================================
+# Step 4: Save cleaned data
+# =========================================================
+# 创建输出目录
+dir.create(here::here("data1"), recursive = TRUE, showWarnings = FALSE)
+
+# 导出数据（移除geometry列，只保留坐标）
+opa_export <- opa_sf %>%
+  select(
+    parcel_number, sale_date, sale_price,
+    number_of_bedrooms, number_of_bathrooms,
+    total_livable_area, year_built,
+    zip_code, category_code,
+    exterior_condition, interior_condition,
+    x_coord = X, y_coord = Y
+  ) %>%
+  st_drop_geometry()  # 强制删除geometry列
+
+write_csv(opa_export, "data1/opa_sales_2023_2024_residential_clean.csv")
+
+cat("Cleaned data saved to: data1/opa_sales_2023_2024_residential_clean.csv\n")
+cat("Final dataset contains", nrow(opa_export), "rows with", ncol(opa_export), "columns\n")
+cat("Columns:", paste(names(opa_export), collapse = ", "), "\n")
+```
+让每条房屋销售样本带上社会经济特征（Census）和空间可达性特征（距离最近公共交通站、公园数量等），为后续分析或建模准备数据。
+```{r}
+# =========================================================
+# Step 5: Enrich with Census & City Features (LOCAL TRANSIT STOPS)
+# =========================================================
+library(sf)
+library(dplyr)
+library(tidycensus)
+library(units)
+library(osmdata)
+library(tigris)
+library(stringr)
+library(readr)
+library(purrr)
+
+analysis_crs <- 2272
+
+# ---------------------------------------------------------
+# 5.1 Read cleaned sales points (must be EPSG:2272)
+# ---------------------------------------------------------
+housing_sf <- st_as_sf(
+  opa_sf %>% filter(!is.na(geometry)),
+  crs = analysis_crs
+)
+
+# ---------------------------------------------------------
+# 5.2 Get 2022 ACS tract data and join to sales
+# ---------------------------------------------------------
+# tidycensus::census_api_key("YOUR_KEY", install = TRUE) # run once if needed
+
+vars <- c(
+  median_hh_income = "B19013_001",
+  pop_total        = "B01003_001",
+  median_age       = "B01002_001"
+)
+
+tracts <- get_acs(
+  geography = "tract",
+  variables = vars,
+  state = "PA",
+  county = "Philadelphia",
+  year = 2022,
+  survey = "acs5",
+  geometry = TRUE
+) |>
+  select(GEOID, variable, estimate, geometry) |>
+  tidyr::pivot_wider(names_from = variable, values_from = estimate) |>
+  rename_with(~ str_replace_all(., "B\\d+_", "")) |>
+  st_transform(analysis_crs)
+
+housing_acs <- st_join(
+  housing_sf,
+  tracts[, c("GEOID", "median_hh_income", "pop_total", "median_age")],
+  join = st_within,
+  left = TRUE
+)
+
+# ---------------------------------------------------------
+# 5.3 Load LOCAL transit stops (Spring 2025) and prepare
+# ---------------------------------------------------------
+# You provided: data/Transit_Stops_(Spring_2025).geojson
+transit_path <- "data1/Transit_Stops_(Spring_2025).geojson"
+stopifnot(file.exists(transit_path))
+
+transit_all <- st_read(transit_path, quiet = TRUE) |>
+  st_transform(analysis_crs) |>
+  suppressWarnings(st_collection_extract("POINT")) |>
+  filter(!st_is_empty(geometry)) |>
+  distinct(geometry, .keep_all = TRUE)
+
+# Optional: keep only rail/subway/trolley if fields exist. Adjust as needed.
+# Example placeholders (uncomment and adapt if your schema has these fields):
+# if ("MODE" %in% names(transit_all)) {
+#   transit_all <- transit_all |> filter(MODE %in% c("Rail","Subway","Trolley","MFL","BSS","NHSL"))
+# }
+# if ("ROUTE_TYPE" %in% names(transit_all)) {
+#   # 0: tram, 1: subway, 2: rail, 3: bus (GTFS). Keep 0/1/2 if you want rail-focused access.
+#   transit_all <- transit_all |> filter(ROUTE_TYPE %in% c(0,1,2,3))  # keep all bus+rail by default
+# }
+
+message("✅ Transit stops loaded: ", nrow(transit_all), " points from local file.")
+
+# ---------------------------------------------------------
+# 5.4 Parks layer (OpenDataPhilly first, fallback to OSM)
+# ---------------------------------------------------------
+read_sf_safe <- function(src) {
+  tryCatch({
+    obj <- st_read(src, quiet = TRUE)
+    if (!is.null(obj) && nrow(obj) > 0) obj else NULL
+  }, error = function(e) NULL)
+}
+
+parks <- read_sf_safe("https://opendata.arcgis.com/api/v3/datasets/b505b15349b84613a8035d7b5b3a6a5f_0.geojson")
+if (is.null(parks)) {
+  message("OpenDataPhilly parks unavailable, falling back to OSM...")
+  options(tigris_use_cache = TRUE)
+  phl_cnty <- counties(state = "PA", cb = TRUE, year = 2022, class = "sf") |>
+    filter(NAME == "Philadelphia") |> st_transform(4326)
+  bbox <- st_bbox(phl_cnty)
+  q_park <- opq(bbox = bbox) |> add_osm_feature(key = "leisure", value = "park")
+  osm_parks <- tryCatch(osmdata_sf(q_park), error = function(e) NULL)
+  if (!is.null(osm_parks$osm_polygons) && nrow(osm_parks$osm_polygons) > 0) {
+    parks <- osm_parks$osm_polygons
+  } else {
+    stop("Could not get park data from OpenDataPhilly or OSM.")
+  }
+}
+parks <- parks |>
+  st_transform(analysis_crs) |>
+  suppressWarnings(st_collection_extract("POLYGON")) |>
+  filter(!st_is_empty(geometry))
+
+message("✅ Parks polygons ready: ", nrow(parks))
+
+# ---------------------------------------------------------
+# 5.5 Accessibility metrics (feet; EPSG:2272)
+# ---------------------------------------------------------
+stopifnot(st_crs(housing_acs)$epsg == analysis_crs)
+
+# Distance to nearest transit stop (bus/trolley/rail)
+nearest_idx <- st_nearest_feature(housing_acs, transit_all)
+dist_ft <- st_distance(housing_acs, transit_all[nearest_idx, ], by_element = TRUE)
+housing_acs$dist_stop_ft <- as.numeric(set_units(dist_ft, "ft"))
+
+# Count of parks within 1000 ft
+buffer_1000ft <- st_buffer(housing_acs, dist = set_units(1000, "ft"))
+housing_acs$parks_1000ft <- lengths(st_intersects(buffer_1000ft, parks))
+
+# ---------------------------------------------------------
+# 5.6 Save enriched dataset
+# ---------------------------------------------------------
+dir.create("data1/enriched", recursive = TRUE, showWarnings = FALSE)
+st_write(housing_acs, "data1/enriched/opa_sales_2023_2024_enriched.gpkg", delete_dsn = TRUE)
+write_csv(st_drop_geometry(housing_acs), "data1/enriched/opa_sales_2023_2024_enriched.csv")
+
+cat("\n✅ Enriched data saved to data1/enriched/opa_sales_2023_2024_enriched.gpkg\n")
+cat("Variables added: median_hh_income, pop_total, median_age, dist_stop_ft, parks_1000ft\n")
+
+
+
+
+```
