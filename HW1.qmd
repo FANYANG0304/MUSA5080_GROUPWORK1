@@ -9,7 +9,7 @@ library(here)
 library(tidyr)
 library(stringr)
 
-opa_raw <- read_csv("D:/UPENN/MUSA5080/HW1/opa_properties_public.csv",
+opa_raw <- read_csv("D:/UPENN/MUSA5080/opa_properties_public.csv",
                     na = c("", "NA", "NaN", "NULL"),
                     guess_max = 1e6)
 
@@ -100,9 +100,9 @@ opa_export <- opa_sf %>%
   ) %>%
   st_drop_geometry()  # 强制删除geometry列
 
-write_csv(opa_export, "../data/opa_sales_2023_2024_residential_clean.csv")
+write_csv(opa_export, "opa_sales_2023_2024_residential_clean.csv")
 
-cat("Cleaned data saved to: data/opa_sales_2023_2024_residential_clean.csv\n")
+cat("Cleaned data saved to: opa_sales_2023_2024_residential_clean.csv\n")
 cat("Final dataset contains", nrow(opa_export), "rows with", ncol(opa_export), "columns\n")
 cat("Columns:", paste(names(opa_export), collapse = ", "), "\n")
 ```
