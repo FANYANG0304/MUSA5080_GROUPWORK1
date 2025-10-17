@@ -27,7 +27,7 @@ hospitals <- st_read("./data/Hospitals.geojson") %>%
 opa_sales_sf <- opa_sales_sf %>%
   mutate(
     dist_to_ppr = apply(st_distance(opa_sales_sf,hospitals), 1, min),
-    ppr_500m = lengths(st_within(opa_sales_sf, st_buffer(hospitals, 1640)))  # 500m≈1640英尺
+    ppr_500m = lengths(st_within(opa_sales_sf, st_buffer(hospitals, 3280)))  # 1000m≈3280英尺
   )
 
 # 检查新增列
