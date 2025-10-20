@@ -1,0 +1,652 @@
+```{r}
+# =========================================================
+# Step 1: Load libraries and data
+# =========================================================
+library(readr)
+library(dplyr)
+library(lubridate)
+library(here)
+library(tidyr)
+library(stringr)
+
+opa_raw <- read_csv("D:/UPENN/MUSA5080/opa_properties_public.csv",
+                    na = c("", "NA", "NaN", "NULL"),
+                    guess_max = 1e6)
+
+cat("Rows (loaded):", nrow(opa_raw), "\n")
+```
+
+```{r}
+# =========================================================
+# Step 2: Data cleaning and filtering
+# =========================================================
+opa_res <- opa_raw %>%
+  mutate(
+    sale_date = as_date(sale_date),
+    # 价格统一为数值：无论原来是数值还是字符（含$, 逗号）
+    sale_price_num = suppressWarnings(
+      coalesce(as.numeric(sale_price), readr::parse_number(as.character(sale_price)))
+    ),
+    # 类别统一类型
+    cat_chr = as.character(category_code)
+  ) %>%
+  filter(
+    cat_chr %in% c("1"),  
+    sale_date >= as_date("2023-01-01"),
+    sale_date <= as_date("2024-12-31"),
+    sale_price_num >= 10000,
+    total_livable_area > 0,
+    year_built > 0,
+    number_of_bedrooms > 0,
+    number_of_bathrooms > 0,
+    !is.na(census_tract),
+    census_tract != 0,
+    census_tract != "",
+    !is.na(zip_code),
+    zip_code != "",
+    !is.na(exterior_condition),
+    exterior_condition != "",
+    !is.na(interior_condition),
+    interior_condition != "",
+    !is.na(shape),
+    shape != ""
+  ) %>%
+  select(
+    parcel_number, sale_date,
+    sale_price = sale_price_num,
+    number_of_bedrooms, number_of_bathrooms,
+    total_livable_area, year_built,
+    zip_code, category_code,
+    exterior_condition, interior_condition,
+    census_tract, shape
+  ) %>%
+  distinct() %>%
+  drop_na()
+
+cat("Rows (after cleaning and filtering):", nrow(opa_res), "\n")
+```
+
+```{r}
+# =========================================================
+# Step 3: Extract coordinates from shape field (using sf)
+# =========================================================
+library(sf)
+library(ggplot2)
+library(viridis)
+
+# 去掉 SRID=2272; 前缀
+wkt <- sub("^SRID=\\d+;\\s*", "", opa_res$shape)
+
+# 转换为 sf
+geom <- st_as_sfc(wkt, crs = 2272)
+opa_sf <- st_sf(opa_res, geometry = geom)
+
+# 提取坐标（用于散点图）
+coords <- st_coordinates(opa_sf)
+opa_sf$X <- coords[, 1]
+opa_sf$Y <- coords[, 2]
+
+# 调试输出
+cat("Rows with valid coordinates:", nrow(opa_sf), "\n")
+cat("Sample X coordinates:", head(opa_sf$X, 3), "\n")
+cat("Sample Y coordinates:", head(opa_sf$Y, 3), "\n")
+```
+
+```{r}
+# =========================================================
+# Step 4: Save cleaned data
+# =========================================================
+# 创建输出目录
+dir.create(here::here("data"), recursive = TRUE, showWarnings = FALSE)
+
+# 导出数据（移除geometry列，只保留坐标）
+opa_export <- opa_sf %>%
+  select(
+    parcel_number, sale_date, sale_price,
+    number_of_bedrooms, number_of_bathrooms,
+    total_livable_area, year_built,
+    zip_code, category_code,
+    exterior_condition, interior_condition,
+    census_tract, x_coord = X, y_coord = Y
+  ) %>%
+  st_drop_geometry()  # 强制删除geometry列
+
+write_csv(opa_export, "./data/opa_sales_2023_2024_residential_clean.csv")
+
+cat("Cleaned data saved to: opa_sales_2023_2024_residential_clean.csv\n")
+cat("Final dataset contains", nrow(opa_export), "rows with", ncol(opa_export), "columns\n")
+cat("Columns:", paste(names(opa_export), collapse = ", "), "\n")
+```
+
+```{r}
+# =========================================================
+# Step 5: Load, clean crime data and calculate crime count for properties
+# =========================================================
+# 确保必要的库已加载
+library(readr)
+library(dplyr)
+library(lubridate)
+library(here)
+library(tidyr)
+library(sf)
+
+# 加载2023年和2024年的犯罪数据
+crime_2023 <- read_csv(here("./data/crime_2023.csv"), na = c("", "NA", "NaN", "NULL"), guess_max = 1e6)
+crime_2024 <- read_csv(here("./data/crime_2024.csv"), na = c("", "NA", "NaN", "NULL"), guess_max = 1e6)
+
+# 合并、清理并处理犯罪数据
+crime_clean <- bind_rows(
+  crime_2023 %>% mutate(year = 2023),
+  crime_2024 %>% mutate(year = 2024)
+) %>%
+  mutate(
+    dispatch_date_time = as_datetime(dispatch_date_time),
+    dispatch_date = as_date(dispatch_date),
+    lat = as.numeric(lat),
+    lng = as.numeric(lng),
+    point_x = as.numeric(point_x),
+    point_y = as.numeric(point_y),
+    ucr_general = as.numeric(ucr_general),
+    text_general_code = as.character(text_general_code)
+  ) %>%
+  filter(
+    !is.na(lat) & !is.na(lng),
+    lat != 0 & lng != 0,
+    dispatch_date >= as_date("2023-01-01"),
+    dispatch_date <= as_date("2024-12-31")
+  ) %>%
+  select(
+    objectid, dc_dist, psa, dispatch_date_time, dispatch_date, 
+    dispatch_time, hour, dc_key, location_block, 
+    ucr_general, text_general_code, 
+    lat, lng, point_x, point_y, year
+  ) %>%
+  distinct() %>%
+  drop_na()
+
+# 坐标转换：从WGS84 (4326) 转换为2272坐标系
+crime_sf <- crime_clean %>%
+  st_as_sf(coords = c("lng", "lat"), crs = 4326) %>%
+  st_transform(crs = 2272) %>%
+  mutate(
+    x_coord_2272 = st_coordinates(.)[, 1],
+    y_coord_2272 = st_coordinates(.)[, 2]
+  ) %>%
+  st_drop_geometry()
+
+# 读取清理后的房地产数据
+opa_clean <- read_csv(here("./data/opa_sales_2023_2024_residential_clean.csv"))
+
+# 将房地产数据转换为sf对象（2272坐标系）
+opa_sf <- opa_clean %>%
+  st_as_sf(coords = c("x_coord", "y_coord"), crs = 2272)
+
+# 将犯罪数据转换为sf对象（2272坐标系）
+crime_sf_spatial <- crime_sf %>%
+  st_as_sf(coords = c("x_coord_2272", "y_coord_2272"), crs = 2272)
+
+# 为每个房子创建0.75英里缓冲区并计算犯罪数量（15分钟步行圈）
+opa_buffers <- st_buffer(opa_sf, dist = 3960)  # 0.75 mile = 3960 feet
+crime_count <- st_intersects(opa_buffers, crime_sf_spatial)
+
+# 将犯罪数量添加到房地产数据中
+opa_with_crime <- opa_clean %>%
+  mutate(
+    crime_count_15min_walk = sapply(crime_count, length)
+  )
+
+cat("犯罪数据处理完成:\n")
+cat("2023年犯罪记录数:", nrow(crime_2023), "\n")
+cat("2024年犯罪记录数:", nrow(crime_2024), "\n")
+cat("清理后有效犯罪记录数:", nrow(crime_clean), "\n")
+cat("坐标转换后记录数:", nrow(crime_sf), "\n")
+cat("房地产记录数:", nrow(opa_with_crime), "\n")
+cat("平均每个房子15分钟步行圈内犯罪数量:", round(mean(opa_with_crime$crime_count_15min_walk), 2), "\n")
+cat("犯罪数量范围:", min(opa_with_crime$crime_count_15min_walk), "-", max(opa_with_crime$crime_count_15min_walk), "\n")
+```
+
+```{r}
+# =========================================================
+# Step 6: 添加公园可达性指标（距离单位：英尺，保留坐标列）
+# =========================================================
+library(sf)
+library(dplyr)
+library(readr)
+library(here)
+
+# 1️⃣ 使用上一步的犯罪数据处理结果
+opa_with_crime <- opa_with_crime
+
+# 转换为 sf 对象（坐标系为 EPSG:2272，以英尺为单位）
+opa_sf <- st_as_sf(
+  opa_with_crime,
+  coords = c("x_coord", "y_coord"),
+  crs = 2272
+)
+
+cat("读取房地产记录数:", nrow(opa_sf), "\n")
+
+# 2️⃣ 读取并投影公园数据
+parks <- st_read(here("./data/PPR_Program_Sites.geojson"), quiet = TRUE) %>%
+  st_transform(2272)
+
+# 3️⃣ 计算公园可达性指标（单位：英尺）
+opa_sf <- opa_sf %>%
+  mutate(
+    dist_to_park_ft = apply(st_distance(opa_sf, parks), 1, min),   # 最近公园距离（英尺）
+    park_within_15min_walk = lengths(st_within(opa_sf, st_buffer(parks, 3960)))  # 0.75 mile = 3960 feet (15分钟步行圈)
+  )
+
+# 4️⃣ 提取坐标，防止 st_drop_geometry 删除
+coords <- st_coordinates(opa_sf)
+opa_sf <- opa_sf %>%
+  mutate(
+    x_coord = coords[, 1],
+    y_coord = coords[, 2]
+  )
+
+# 5️⃣ 导出数据（保留坐标与新增指标）
+opa_export <- opa_sf %>%
+  st_drop_geometry() %>%
+  select(
+    parcel_number, sale_date, sale_price,
+    number_of_bedrooms, number_of_bathrooms,
+    total_livable_area, year_built,
+    zip_code, category_code,
+    exterior_condition, interior_condition,
+    census_tract,
+     x_coord, y_coord,                 # ✅ 保留坐标
+     crime_count_15min_walk,            # 犯罪数量
+     dist_to_park_ft,                  # 最近公园距离（英尺）
+     park_within_15min_walk            # 15分钟步行圈内公园数量
+  )
+
+# 6️⃣ 输出摘要信息
+# 保存包含公园指标的完整数据
+write_csv(opa_export, here("./data/opa_sales_with_parks.csv"))
+
+cat("✅ 公园指标已添加（单位：英尺）\n")
+cat("  平均最近公园距离:", round(mean(opa_export$dist_to_park_ft, na.rm = TRUE), 1), "ft\n")
+cat("  平均15分钟步行圈内公园数量:", round(mean(opa_export$park_within_15min_walk, na.rm = TRUE), 2), "\n")
+cat("  字段数:", ncol(opa_export), "列（包含坐标列）\n")
+cat("🎉 数据已保存到: ./data/opa_sales_with_parks.csv\n")
+```
+
+```{r}
+# =========================================================
+# Step 7: 添加公共交通可达性指标（距离最近公交站 & 1000英尺范围内公交站数量）
+# =========================================================
+library(sf)
+library(dplyr)
+library(readr)
+library(here)
+library(units)
+
+# 使用相同坐标系（EPSG:2272, 单位为英尺）
+analysis_crs <- 2272
+
+# 1️⃣ 读取上一步保存的数据（带房价、犯罪、公园指标）
+opa_data <- read_csv(here("./data/opa_sales_with_parks.csv"))
+opa_sf <- opa_data %>%
+  st_as_sf(coords = c("x_coord", "y_coord"), crs = analysis_crs)
+
+cat("读取房地产记录数:", nrow(opa_sf), "\n")
+
+# 2️⃣ 读取并投影公交站点数据
+transit_path <- here("./data/Transit_Stops_(Spring_2025).geojson")
+stopifnot(file.exists(transit_path))
+
+transit_stops <- st_read(transit_path, quiet = TRUE) %>%
+  st_transform(analysis_crs) %>%
+  suppressWarnings(st_collection_extract("POINT")) %>%
+  filter(!st_is_empty(geometry)) %>%
+  distinct(geometry, .keep_all = TRUE)
+
+cat("公交站点数量:", nrow(transit_stops), "\n")
+
+# 3️⃣ 计算可达性指标（单位：英尺）
+# 最近公交站距离
+nearest_idx <- st_nearest_feature(opa_sf, transit_stops)
+dist_ft <- st_distance(opa_sf, transit_stops[nearest_idx, ], by_element = TRUE)
+opa_sf$dist_transit_ft <- as.numeric(set_units(dist_ft, "ft"))
+
+# 15分钟步行圈内公交站数量
+buffer_3960ft <- st_buffer(opa_sf, dist = 3960)  # 0.75 mile = 3960 feet
+opa_sf$transit_15min_walk <- lengths(st_intersects(buffer_3960ft, transit_stops))
+
+# 4️⃣ 提取坐标，防止 st_drop_geometry 删除
+coords <- st_coordinates(opa_sf)
+opa_sf <- opa_sf %>%
+  mutate(
+    x_coord = coords[, 1],
+    y_coord = coords[, 2]
+  )
+
+# 5️⃣ 导出结果（保留坐标与新增指标）
+opa_export <- opa_sf %>%
+  st_drop_geometry() %>%
+  select(
+    parcel_number, sale_date, sale_price,
+    number_of_bedrooms, number_of_bathrooms,
+    total_livable_area, year_built,
+    zip_code, category_code,
+    exterior_condition, interior_condition,
+    census_tract,
+     x_coord, y_coord,                 # ✅ 保留坐标
+     crime_count_15min_walk,            # 犯罪数量
+     dist_to_park_ft, park_within_15min_walk,# 公园指标
+     dist_transit_ft, transit_15min_walk    # 公交指标
+  )
+
+# 6️⃣ 输出摘要信息
+# 保存包含公交指标的完整数据
+write_csv(opa_export, here("./data/opa_sales_with_transit.csv"))
+
+cat("✅ 公共交通指标已添加\n")
+cat("  平均最近公交站距离:", round(mean(opa_export$dist_transit_ft, na.rm = TRUE), 1), "ft\n")
+cat("  平均15分钟步行圈内公交站数量:", round(mean(opa_export$transit_15min_walk, na.rm = TRUE), 2), "\n")
+cat("  字段数:", ncol(opa_export), "列（包含坐标列）\n")
+cat("🎉 数据已保存到: ./data/opa_sales_with_transit.csv\n")
+
+```
+
+```{r}
+# =========================================================
+# Step 8: 添加医院可达性指标（距离最近医院 & 500米≈1640英尺范围内医院数量）
+# =========================================================
+library(sf)
+library(dplyr)
+library(readr)
+library(here)
+
+# 坐标系：EPSG 2272（单位：英尺）
+analysis_crs <- 2272
+
+# 1️⃣ 读取上一步保存的数据（含房价、犯罪、公园、公交指标）
+opa_data <- read_csv(here("./data/opa_sales_with_transit.csv"))
+opa_sf <- opa_data %>%
+  st_as_sf(coords = c("x_coord", "y_coord"), crs = analysis_crs)
+
+cat("读取房地产记录数:", nrow(opa_sf), "\n")
+
+# 2️⃣ 读取医院数据并投影到相同坐标系
+hospitals <- st_read(here("./data/Hospitals.geojson"), quiet = TRUE) %>%
+  st_transform(analysis_crs)
+
+cat("医院数量:", nrow(hospitals), "\n")
+
+# 3️⃣ 计算医院可达性指标（单位：英尺）
+opa_sf <- opa_sf %>%
+  mutate(
+    # 最近医院距离（英尺）
+    dist_to_hospital_ft = as.numeric(apply(st_distance(opa_sf, hospitals), 1, min)),
+    # 15分钟步行圈内医院数量
+    hospitals_15min_walk = lengths(st_within(opa_sf, st_buffer(hospitals, 3960)))  # 0.75 mile = 3960 feet
+  )
+
+# 4️⃣ 提取坐标（防止 st_drop_geometry 删除）
+coords <- st_coordinates(opa_sf)
+opa_sf <- opa_sf %>%
+  mutate(
+    x_coord = coords[, 1],
+    y_coord = coords[, 2]
+  )
+
+# 5️⃣ 导出结果（保留坐标与所有特征）
+opa_export <- opa_sf %>%
+  st_drop_geometry() %>%
+  select(
+    parcel_number, sale_date, sale_price,
+    number_of_bedrooms, number_of_bathrooms,
+    total_livable_area, year_built,
+    zip_code, category_code,
+    exterior_condition, interior_condition,
+    census_tract,
+     x_coord, y_coord,                        # ✅ 保留坐标
+     crime_count_15min_walk,                  # 犯罪指标
+     dist_to_park_ft, park_within_15min_walk, # 公园指标
+     dist_transit_ft, transit_15min_walk,     # 公交指标
+     dist_to_hospital_ft, hospitals_15min_walk # ✅ 医院指标（新增）
+  )
+
+# 6️⃣ 输出摘要信息
+# 保存包含医院指标的完整数据
+write_csv(opa_export, here("./data/opa_sales_with_hospitals.csv"))
+
+cat("✅ 医院可达性指标已添加\n")
+cat("  平均最近医院距离:", round(mean(opa_export$dist_to_hospital_ft, na.rm = TRUE), 1), "ft\n")
+cat("  平均15分钟步行圈内医院数量:", round(mean(opa_export$hospitals_15min_walk, na.rm = TRUE), 2), "\n")
+cat("  字段数:", ncol(opa_export), "列（包含坐标列）\n")
+cat("  包含所有特征：房地产信息 + 犯罪 + 公园 + 公交 + 医院\n")
+cat("🎉 数据已保存到: ./data/opa_sales_with_hospitals.csv\n")
+
+```
+
+```{r}
+# =========================================================
+# Step 9: Enrich with ACS (Census) Socioeconomic Indicators
+# =========================================================
+library(sf)
+library(dplyr)
+library(tidycensus)
+library(readr)
+library(here)
+
+# ---------------------------------------------------------
+# 1️⃣ 读取最终房产数据（包含所有可达性指标）
+# ---------------------------------------------------------
+opa_final <- read_csv(here("./data/opa_sales_with_hospitals.csv"))
+
+# 转为 sf 对象（确保坐标系为 EPSG:2272）
+opa_sf <- opa_final %>%
+  st_as_sf(coords = c("x_coord", "y_coord"), crs = 2272, remove = FALSE)
+
+cat("读取房产记录数:", nrow(opa_sf), "\n")
+
+# ---------------------------------------------------------
+# 2️⃣ 下载费城市 2022 年 ACS 数据（可改年份）
+# ---------------------------------------------------------
+year_acs <- 2022
+census_api_key("86993dedbe98d77b9d79db6b8ba21a7fde55cb91", install = FALSE)
+
+acs_vars <- c(
+  total_pop      = "B01003_001",
+  median_income  = "B19013_001",
+  per_cap_income = "B19301_001",
+  below_pov      = "B17001_002",
+  edu_total25    = "B15003_001",
+  edu_bach       = "B15003_022",
+  edu_mast       = "B15003_023",
+  edu_prof       = "B15003_024",
+  edu_phd        = "B15003_025"
+)
+
+phl_acs <- get_acs(
+  geography = "tract",
+  state = "PA",
+  county = "Philadelphia",
+  year = year_acs,
+  geometry = TRUE,
+  output = "wide",
+  variables = acs_vars
+) %>%
+  mutate(
+    PCBACHMORE = 100 * ((edu_bachE + edu_mastE + edu_profE + edu_phdE) / edu_total25E),
+    PCTPOVERTY = 100 * (below_povE / total_popE)
+  ) %>%
+  select(geometry, GEOID, total_popE, median_incomeE, per_cap_incomeE, PCBACHMORE, PCTPOVERTY)
+
+# ---------------------------------------------------------
+# 3️⃣ 投影对齐（EPSG:2272）
+# ---------------------------------------------------------
+phl_acs <- st_transform(phl_acs, 2272)
+
+# ---------------------------------------------------------
+# 4️⃣ 空间连接：房屋落在某个 tract 中
+# ---------------------------------------------------------
+opa_joined <- st_join(
+  opa_sf,
+  phl_acs,
+  join = st_within,
+  left = TRUE
+)
+
+# ---------------------------------------------------------
+# 5️⃣ 边界外样本（偶尔有 NA）用最近 tract 填充
+# ---------------------------------------------------------
+missing <- is.na(opa_joined$median_incomeE)
+if (any(missing)) {
+  idx <- st_nearest_feature(opa_joined[missing, ], phl_acs)
+  repl <- phl_acs[idx, ] %>% st_drop_geometry()
+  cols <- names(repl)
+  opa_joined[missing, cols] <- repl
+}
+
+# ---------------------------------------------------------
+# 6️⃣ 导出结果
+# ---------------------------------------------------------
+opa_export <- opa_joined %>%
+  st_drop_geometry() %>%
+  select(
+    parcel_number, sale_date, sale_price,
+    number_of_bedrooms, number_of_bathrooms,
+    total_livable_area, year_built,
+    zip_code, category_code,
+    exterior_condition, interior_condition,
+    census_tract,
+    x_coord, y_coord,
+    crime_count_15min_walk,              # 犯罪
+    dist_to_park_ft, park_within_15min_walk, # 公园
+    dist_transit_ft, transit_15min_walk, # 公交
+    dist_to_hospital_ft, hospitals_15min_walk, # 医院
+    total_popE, median_incomeE, per_cap_incomeE, PCBACHMORE, PCTPOVERTY  # 🆕 Census
+  )
+
+# 保存包含Census指标的完整数据
+write_csv(opa_export, here("./data/opa_sales_final_complete.csv"))
+
+cat("✅ Census 社会经济指标已添加\n")
+cat("  平均收入 (USD):", round(mean(opa_export$median_incomeE, na.rm = TRUE), 0), "\n")
+cat("  平均贫困率 (%):", round(mean(opa_export$PCTPOVERTY, na.rm = TRUE), 2), "\n")
+cat("  平均本科及以上学历比例 (%):", round(mean(opa_export$PCBACHMORE, na.rm = TRUE), 2), "\n")
+cat("  包含所有特征：房价 + 犯罪 + 公园 + 公交 + 医院 + 社会经济\n")
+cat("🎉 数据已保存到: ./data/opa_sales_final_complete.csv\n")
+
+```
+
+```{r}
+# =========================================================
+# Step 10: Add Education Accessibility Indicators (Schools)
+# =========================================================
+library(sf)
+library(dplyr)
+library(readr)
+library(here)
+library(units)
+
+# ---------------------------------------------------------
+# 1️⃣ 读取上一步保存的完整数据（包含 Census 与可达性特征）
+# ---------------------------------------------------------
+opa_data <- read_csv(here("./data/opa_sales_final_complete.csv"))
+opa_sf <- opa_data %>%
+  st_as_sf(coords = c("x_coord", "y_coord"), crs = 2272, remove = FALSE)
+
+cat("读取房产记录数:", nrow(opa_sf), "\n")
+cat("数据列名:", paste(names(opa_sf), collapse = ", "), "\n")
+
+# ---------------------------------------------------------
+# 2️⃣ 读取学校数据（仅一个文件）
+# ---------------------------------------------------------
+schools <- st_read(here("./data/Schools_Parcels.geojson"), quiet = TRUE) %>%
+  st_transform(2272) %>%
+  filter(!st_is_empty(geometry))  # 过滤掉空的几何体
+
+cat("✅ 已加载学校数据:", nrow(schools), "条记录\n")
+cat("学校数据坐标系:", st_crs(schools)$input, "\n")
+cat("房产数据坐标系:", st_crs(opa_sf)$input, "\n")
+
+# ---------------------------------------------------------
+# 3️⃣ 计算教育可达性指标
+# ---------------------------------------------------------
+# 最近学校距离（英尺）
+cat("开始计算最近学校距离...\n")
+dist_matrix <- st_distance(opa_sf, schools)
+cat("距离矩阵维度:", dim(dist_matrix), "\n")
+opa_sf$dist_to_nearest_school_ft <- as.numeric(apply(dist_matrix, 1, min))
+cat("最近学校距离计算完成，范围:", min(opa_sf$dist_to_nearest_school_ft), "-", max(opa_sf$dist_to_nearest_school_ft), "英尺\n")
+
+# 15分钟步行圈内学校数量
+cat("开始计算15分钟步行圈内学校数量...\n")
+buffer_3960ft <- st_buffer(opa_sf, dist = 3960)  # 0.75 mile = 3960 feet
+opa_sf$schools_within_15min_walk <- lengths(st_intersects(buffer_3960ft, schools))
+cat("15分钟步行圈内学校数量计算完成，范围:", min(opa_sf$schools_within_15min_walk), "-", max(opa_sf$schools_within_15min_walk), "\n")
+
+# ---------------------------------------------------------
+# 4️⃣ 提取坐标并保持完整列
+# ---------------------------------------------------------
+coords <- st_coordinates(opa_sf)
+opa_sf <- opa_sf %>%
+  mutate(
+    x_coord = coords[, 1],
+    y_coord = coords[, 2]
+  )
+
+# ---------------------------------------------------------
+# 5️⃣ 导出带教育指标的完整表
+# ---------------------------------------------------------
+opa_export <- opa_sf %>%
+  st_drop_geometry() %>%
+  select(
+    parcel_number, sale_date, sale_price,
+    number_of_bedrooms, number_of_bathrooms,
+    total_livable_area, year_built,
+    zip_code, category_code,
+    exterior_condition, interior_condition,
+    census_tract,
+    x_coord, y_coord,
+    crime_count_15min_walk,                  # 犯罪
+    dist_to_park_ft, park_within_15min_walk, # 公园
+    dist_transit_ft, transit_15min_walk,     # 公交
+    dist_to_hospital_ft, hospitals_15min_walk, # 医院
+    total_popE, median_incomeE, per_cap_incomeE, PCBACHMORE, PCTPOVERTY,  # Census
+    dist_to_nearest_school_ft, schools_within_15min_walk                  # 🆕 学校
+  )
+
+# ---------------------------------------------------------
+# 6️⃣ 清理数据：删除所有包含空值、NA的行
+# ---------------------------------------------------------
+# 记录清理前的行数
+rows_before <- nrow(opa_export)
+
+# 删除所有包含空值、NA的行（包括各种形式的NA）
+# 先将各种形式的空值转换为NA
+opa_export <- opa_export %>%
+  mutate(across(everything(), ~ {
+    if (is.character(.x)) {
+      clean_val <- trimws(tolower(as.character(.x)))
+      ifelse(clean_val == "" | clean_val == "na" | clean_val == "n/a" | clean_val == "null", 
+             NA, .x)
+    } else {
+      .x
+    }
+  })) %>%
+  # 然后删除任何列包含NA的行
+  drop_na()
+
+# 记录清理后的行数
+rows_after <- nrow(opa_export)
+rows_removed <- rows_before - rows_after
+
+# 保存清理后的数据
+write_csv(opa_export, here("./data/opa_sales_final_complete.csv"))
+
+cat("✅ 教育设施可达性指标已添加\n")
+cat("  平均最近学校距离:", round(mean(opa_export$dist_to_nearest_school_ft, na.rm = TRUE), 1), "ft\n")
+cat("  平均15分钟步行圈内学校数量:", round(mean(opa_export$schools_within_15min_walk, na.rm = TRUE), 2), "\n")
+cat("🧹 数据清理完成：删除了", rows_removed, "行包含空值或NA的记录\n")
+cat("  清理前:", rows_before, "行 → 清理后:", rows_after, "行\n")
+cat("🎉 最终完整数据已保存到: ./data/opa_sales_final_complete.csv\n")
+cat("  包含所有特征：房价 + 犯罪 + 公园 + 公交 + 医院 + Census + 学校\n")
+cat("  字段数:", ncol(opa_export), "列（包含坐标列）\n")
+
+```
