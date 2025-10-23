@@ -1,125 +1,5 @@
 ```{r}
 # =========================================================
-# Step 1: Load libraries and data
-# =========================================================
-library(readr)
-library(dplyr)
-library(lubridate)
-library(here)
-library(tidyr)
-library(stringr)
-
-opa_raw <- read_csv("D:/UPENN/MUSA5080/opa_properties_public.csv",
-                    na = c("", "NA", "NaN", "NULL"),
-                    guess_max = 1e6)
-
-cat("Rows (loaded):", nrow(opa_raw), "\n")
-```
-
-```{r}
-# =========================================================
-# Step 2: Data cleaning and filtering
-# =========================================================
-opa_res <- opa_raw %>%
-  mutate(
-    sale_date = as_date(sale_date),
-    # 价格统一为数值：无论原来是数值还是字符（含$, 逗号）
-    sale_price_num = suppressWarnings(
-      coalesce(as.numeric(sale_price), readr::parse_number(as.character(sale_price)))
-    ),
-    # 类别统一类型
-    cat_chr = as.character(category_code)
-  ) %>%
-  filter(
-    cat_chr %in% c("1"),  
-    sale_date >= as_date("2023-01-01"),
-    sale_date <= as_date("2024-12-31"),
-    sale_price_num >= 10000,
-    total_livable_area > 0,
-    year_built > 0,
-    number_of_bedrooms > 0,
-    number_of_bathrooms > 0,
-    !is.na(census_tract),
-    census_tract != 0,
-    census_tract != "",
-    !is.na(zip_code),
-    zip_code != "",
-    !is.na(exterior_condition),
-    exterior_condition != "",
-    !is.na(interior_condition),
-    interior_condition != "",
-    !is.na(shape),
-    shape != ""
-  ) %>%
-  select(
-    parcel_number, sale_date,
-    sale_price = sale_price_num,
-    number_of_bedrooms, number_of_bathrooms,
-    total_livable_area, year_built,
-    zip_code, category_code,
-    exterior_condition, interior_condition,
-    census_tract, shape
-  ) %>%
-  distinct() %>%
-  drop_na()
-
-cat("Rows (after cleaning and filtering):", nrow(opa_res), "\n")
-```
-
-```{r}
-# =========================================================
-# Step 3: Extract coordinates from shape field (using sf)
-# =========================================================
-library(sf)
-library(ggplot2)
-library(viridis)
-
-# 去掉 SRID=2272; 前缀
-wkt <- sub("^SRID=\\d+;\\s*", "", opa_res$shape)
-
-# 转换为 sf
-geom <- st_as_sfc(wkt, crs = 2272)
-opa_sf <- st_sf(opa_res, geometry = geom)
-
-# 提取坐标（用于散点图）
-coords <- st_coordinates(opa_sf)
-opa_sf$X <- coords[, 1]
-opa_sf$Y <- coords[, 2]
-
-# 调试输出
-cat("Rows with valid coordinates:", nrow(opa_sf), "\n")
-cat("Sample X coordinates:", head(opa_sf$X, 3), "\n")
-cat("Sample Y coordinates:", head(opa_sf$Y, 3), "\n")
-```
-
-```{r}
-# =========================================================
-# Step 4: Save cleaned data
-# =========================================================
-# 创建输出目录
-dir.create(here::here("data"), recursive = TRUE, showWarnings = FALSE)
-
-# 导出数据（移除geometry列，只保留坐标）
-opa_export <- opa_sf %>%
-  select(
-    parcel_number, sale_date, sale_price,
-    number_of_bedrooms, number_of_bathrooms,
-    total_livable_area, year_built,
-    zip_code, category_code,
-    exterior_condition, interior_condition,
-    census_tract, x_coord = X, y_coord = Y
-  ) %>%
-  st_drop_geometry()  # 强制删除geometry列
-
-write_csv(opa_export, "./data/opa_sales_2023_2024_residential_clean.csv")
-
-cat("Cleaned data saved to: opa_sales_2023_2024_residential_clean.csv\n")
-cat("Final dataset contains", nrow(opa_export), "rows with", ncol(opa_export), "columns\n")
-cat("Columns:", paste(names(opa_export), collapse = ", "), "\n")
-```
-
-```{r}
-# =========================================================
 # Step 5: Load, clean crime data and calculate crime count for properties
 # =========================================================
 # 确保必要的库已加载
@@ -649,4 +529,104 @@ cat("🎉 最终完整数据已保存到: ./data/opa_sales_final_complete.csv\n"
 cat("  包含所有特征：房价 + 犯罪 + 公园 + 公交 + 医院 + Census + 学校\n")
 cat("  字段数:", ncol(opa_export), "列（包含坐标列）\n")
 
+```
+```{r plots}
+# =========================
+# Setup
+# =========================
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(e1071)
+library(purrr)
+library(patchwork)
+
+df <- read_csv("./data/opa_sales_final_complete.csv")
+
+# 仅数值列
+num <- df %>% select(where(is.numeric))
+
+# 安全对数变换：优先log1p，若含负数则整体右移到>0后log
+safe_log <- function(x) {
+  x <- as.numeric(x)
+  if (all(is.na(x))) return(x)
+  if (all(is.na(x) | is.infinite(x))) return(x)
+  # 若全部非负，直接log1p
+  if (min(x, na.rm = TRUE) >= 0) return(log1p(x))
+  # 含负值：整体平移到>0，再log
+  shift <- -min(x, na.rm = TRUE) + 1
+  log(x + shift)
+}
+
+# 计算偏度
+skew_tbl <- num %>%
+  summarise(across(everything(), ~ skewness(.x, na.rm = TRUE))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "skew_before") %>%
+  mutate(needs_log = abs(skew_before) >= 1)
+
+# 仅对高偏变量做对照
+vars_high <- skew_tbl %>% filter(needs_log) %>% pull(variable)
+
+# 输出目录
+dir.create("plots_before_after", showWarnings = FALSE)
+
+# 逐变量绘图并记录变换后偏度
+skew_after_list <- list()
+
+for (v in vars_high) {
+  x <- num[[v]]
+  x_log <- safe_log(x)
+
+  sk_b <- skewness(x, na.rm = TRUE)
+  sk_a <- skewness(x_log, na.rm = TRUE)
+  skew_after_list[[v]] <- sk_a
+
+  p1 <- ggplot(data.frame(x = x), aes(x = x)) +
+    geom_histogram(aes(y = ..density..), bins = 30, fill = "#9ecae1", color = "white") +
+    geom_density(size = 1) +
+    labs(title = paste0(v, " | Before (skew=", round(sk_b, 2), ")"),
+         x = v, y = "Density") +
+    theme_minimal(base_size = 12)
+
+  p2 <- ggplot(data.frame(x = x_log), aes(x = x)) +
+    geom_histogram(aes(y = ..density..), bins = 30, fill = "#fc9272", color = "white") +
+    geom_density(size = 1) +
+    labs(title = paste0(v, " | After log (skew=", round(sk_a, 2), ")"),
+         x = paste0("log-transformed ", v), y = "Density") +
+    theme_minimal(base_size = 12)
+
+  g <- p1 + p2 + plot_layout(ncol = 2)
+  ggsave(file.path("plots_before_after", paste0("compare_", v, ".png")),
+         g, width = 12, height = 4.5, dpi = 150)
+}
+
+# 合并偏度对照表并导出
+skew_after_tbl <- tibble(variable = names(skew_after_list),
+                         skew_after = unlist(skew_after_list, use.names = FALSE))
+
+skew_compare <- skew_tbl %>%
+  left_join(skew_after_tbl, by = "variable") %>%
+  mutate(improved = ifelse(!is.na(skew_after) & abs(skew_after) < abs(skew_before), "Yes", "No"))
+
+write.csv(skew_compare, "skewness_before_after_summary.csv", row.names = FALSE)
+
+# 同时给所有数值列各自的“原始分布图”（单图）以便浏览
+dir.create("plots_single", showWarnings = FALSE)
+walk(names(num), function(v){
+  x <- num[[v]]
+  sk <- skewness(x, na.rm = TRUE)
+  p <- ggplot(data.frame(x = x), aes(x = x)) +
+    geom_histogram(aes(y = ..density..), bins = 30, fill = "#bdbdbd", color = "white") +
+    geom_density(size = 1) +
+    labs(title = paste0(v, " (skew=", round(sk, 2), ")"), x = v, y = "Density") +
+    theme_minimal(base_size = 12)
+  ggsave(file.path("plots_single", paste0("hist_", v, ".png")), p, width = 6, height = 4, dpi = 150)
+})
+
+# 控制台提示
+message("完成：",
+        "\n1) 对照图：plots_before_after/*.png",
+        "\n2) 单图：plots_single/*.png",
+        "\n3) 偏度对照表：skewness_before_after_summary.csv")
 ```
