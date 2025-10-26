@@ -1,0 +1,156 @@
+---
+
+title: "Philadelphia Housing Price Prediction"
+subtitle: "Improving Property Tax Assessments"
+author: "Your Name"
+date: "October 26, 2025"
+format: 
+  revealjs:
+    theme: simple
+    slide-number: true
+    smaller: true
+    
+---
+
+## Are current property tax assessments in Philadelphia fair and accurate?
+
+- Property taxes depend on OPA’s assessed values.  
+- Assessments often deviate from actual sale prices.  
+- Some areas are consistently over- or under-assessed.  
+- Unequal assessments create unfair tax burdens.  
+- **Key Question:** Are OPA assessments accurate and equitable across the city?
+
+![Source: Reinvestment Fund, *Examining the Accuracy, Uniformity & Equity of Philadelphia’s 2023 Real Estate Assessments* (Apr 2024)](images/OPA_bias.png){width="40%"}
+> The aqua rectangle marks the acceptable range (IAAO).  
+> Many zones fall outside this range — showing geographic bias in assessments.
+
+---
+##
+
+Fairness: Ensure residents pay taxes aligned with true property values.
+
+Transparency: Build trust through objective, data-based methods.
+
+Efficiency: Improve city revenue stability and policy planning.
+
+Traditional assessments rely on outdated, manual approaches.
+
+Machine learning models can better capture local market dynamics.
+
+---
+
+## Data Sources
+Philadelphia Property Sales (n= 24023,2023-2024)
+
+Census ACS (income, education, poverty)
+
+OpenDataPhilly (number and distance: crime, park&recreation, transportation, hospital,school )
+
+![](images/categories.png){width="40%"}
+
+---
+
+## Spatial Distribution of Housing and Prices
+:::columns
+:::column
+### Where Are the Houses?
+
+![](images/spatial_density_hexbin.png){width="40%"}
+:::
+:::column
+
+### Where Are the Expensive Houses?
+![](images/spatial_price_distribution.png){width="40%"}
+:::
+:::
+
+---
+
+## Larger homes, higher neighborhood income, and more bathrooms increase prices — while older properties tend to sell for less.
+
+![](images/key_variables_scatter.png){width="40%"}
+
+---
+
+## Adding more real-world data to build a more fair and accurate housing price model
+
+**Model Evolution**
+- M1: Basic home features (size, age) → simple but limited  
+- M2: + Census data → adds community context  
+- M3: + Spatial data → captures location effects  
+- M4: + Interactions → reflects real neighborhood differences
+
+![](images/ols_4model_performance.png){width="40%"}
+
+---
+
+## Core factors like home size and bathrooms remain important across all models, while neighborhood and location features gain influence as data become more detailed.
+
+**Observations**
+- Structural features (bathrooms, livable area) stay top-ranked across all models  
+- Socioeconomic and spatial factors (income, census tract) rise in importance as they’re added  
+- Final model shows *location effects* becoming dominant predictors of price
+
+![](images/feature_importance_lollipop_v2.png){width="40%"}
+
+---
+
+## Model Performance: The predicted prices from our final model align strongly with actual sales.
+Our approach can reliably estimate market values across neighborhoods.
+
+
+
+
+![](images/spatial_prediction_comparison.png){width="40%"}
+![](images/model_performance_table.png){width="40%"}
+>“Average Error ($)” shows the average gap between predicted and actual prices (lower = more accurate).
+
+---
+
+## The map highlights neighborhoods where predicted prices differ most from actual sales.
+
+These areas, shown in deep red or blue, are likely where property assessments are least accurate, and where tax fairness may be at greatest risk.
+
+![](images/spatial_prediction_residuals.png){width="40%"}
+**Interpretation**
+- **Blue areas:** Homes undervalued by the model → may face *under-assessment*  
+- **Red areas:** Homes overvalued → may face *over-assessment*  
+- **Central & southern zones** show the largest mismatches — indicating uneven market patterns
+
+> These “hard-to-predict” areas should be prioritized for review in future assessment updates.
+
+---
+
+## Three Evidence-Based Recommendations
+
+Review Where the Model Shows the Largest Gaps
+→ Our residual analysis pinpoints neighborhoods with the highest prediction errors — the same areas where assessments are likely least fair.
+Prioritize these zones for reassessment and data verification.
+
+Use the Model as a Fairness Benchmark
+→ Instead of replacing official assessments, use the model as a cross-check tool to flag properties with unusually high or low assessed-to-predicted ratios.
+
+Institutionalize Annual Model Updates
+→ Retrain the model each year using new sales and census data so assessments stay current with real market trends, preventing future inequities.
+
+---
+
+## Limitations & Next Steps
+
+**Data Coverage and Quality**
+
+Property sales data may not fully represent the entire housing stock — especially under-assessed or low-transaction neighborhoods.
+
+Inconsistent or missing entries (e.g., renovation status, multi-unit conversions) can affect accuracy.
+
+**Unobserved Neighborhood Factors**
+
+The model cannot fully capture intangible influences such as school reputation, street conditions, or historical value perceptions that affect prices.
+
+**Static Model Timing**
+
+Our predictions are based on 2023–2024 data; housing markets change quickly.
+
+Without periodic updates, accuracy and fairness will decline over time.
+
+---
